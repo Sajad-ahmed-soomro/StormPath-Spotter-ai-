@@ -39,7 +39,13 @@ def health(request):
 
 @api_view(["GET"])
 def meta(request):
-    return Response({"rules": rules_payload(), "truck_max_speed_mph": settings.TRUCK_MAX_SPEED_MPH})
+    return Response(
+        {
+            "rules": rules_payload(),
+            "truck_max_speed_mph": settings.TRUCK_MAX_SPEED_MPH,
+            "basemap": {"url": settings.BASEMAP_URL, "labels_url": settings.BASEMAP_LABELS_URL},
+        }
+    )
 
 
 @api_view(["GET"])

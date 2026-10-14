@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type Checkpoint, type HeatLayerKey, type HeatmapResponse, type PlanRequest, type PlanResponse } from "./api";
+import {
+  api,
+  type Checkpoint,
+  type HeatLayerKey,
+  type HeatmapResponse,
+  type MetaResponse,
+  type PlanRequest,
+  type PlanResponse,
+} from "./api";
 import { ForecastControl, MAX_HOUR } from "./components/ForecastControl";
 import { HowItWorks } from "./components/HowItWorks";
 import { PlanForm } from "./components/PlanForm";
@@ -21,6 +29,7 @@ const PLAN_STAGES = [
 ];
 
 export default function App() {
+  const [meta, setMeta] = useState<MetaResponse | null>(null);
   const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [planStatus, setPlanStatus] = useState<Status>("idle");
   const [planError, setPlanError] = useState<string | null>(null);
@@ -88,6 +97,10 @@ export default function App() {
     },
     [loadHeatmap],
   );
+
+  useEffect(() => {
+    api.meta().then(setMeta).catch(() => setMeta(null));
+  }, []);
 
   // Progress messages while the (single) plan request runs.
   useEffect(() => {
@@ -205,6 +218,7 @@ export default function App() {
 
       <main className="map-area">
         <MapView
+          basemap={meta?.basemap ?? null}
           plan={plan}
           selectedId={selectedId}
           onSelect={onSelect}

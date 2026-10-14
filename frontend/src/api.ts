@@ -105,6 +105,12 @@ export interface HeatmapResponse {
   layers: Record<HeatLayerKey, number[][]>;
 }
 
+export interface MetaResponse {
+  rules: Rules;
+  truck_max_speed_mph: number;
+  basemap: { url: string; labels_url: string };
+}
+
 export interface PlanRequest {
   origin: Place;
   destination: Place;
@@ -133,6 +139,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  meta: () => request<MetaResponse>("/api/meta/"),
   geocode: (q: string, signal?: AbortSignal) =>
     request<{ results: (ResolvedPlace & { type?: string })[] }>(
       `/api/geocode/?q=${encodeURIComponent(q)}`,

@@ -21,12 +21,14 @@ Requirements: Python 3.11+ and Node 18+.
 ```bash
 # Backend (http://127.0.0.1:8000)
 cd backend
+cp .env.example .env          # then set DJANGO_SECRET_KEY (command is in the file)
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python manage.py runserver
 
-# Frontend dev server (http://localhost:5173, proxies /api to :8000)
+# Frontend dev server (http://localhost:5173, proxies /api to the backend)
 cd frontend
+cp .env.example .env
 npm install
 npm run dev
 ```
@@ -50,14 +52,26 @@ cd frontend && npm run typecheck
 
 The repo ships a multi-stage `Dockerfile` (it builds the React app, then runs Django under gunicorn) and a Render blueprint (`render.yaml`). On Render, choose **New → Blueprint** and point it at this repo. Any Docker host works the same way. It listens on `$PORT`.
 
-| Env var | Default | Purpose |
+All configuration lives in environment variables. Nothing (API endpoints, keys, secrets) is hardcoded. Locally they are read from `backend/.env` and `frontend/.env`. Both files are git-ignored; copy them from the committed `.env.example` files. On Render, `render.yaml` generates the secret key and prompts for the other values in the dashboard (copy them from `backend/.env.example`). If a required variable is missing, the app stops at startup with a message naming it.
+
+| Backend variable | Required | Purpose |
 |---|---|---|
-| `DJANGO_SECRET_KEY` | dev key | Set in production |
-| `DJANGO_DEBUG` | `true` | `false` in production |
-| `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1,.onrender.com` | Comma-separated |
-| `OSRM_URLS` | demo server, FOSSGIS mirror | Tried in order, with hedging |
-| `OPEN_METEO_API_KEY` | – | Optional, lifts free-tier limits |
-| `TRUCK_MAX_SPEED_MPH` | `65` | Speed cap applied to ETAs |
+| `DJANGO_SECRET_KEY` | yes | Django secret |
+| `DJANGO_DEBUG` | no (`false`) | `true` for local development |
+| `DJANGO_ALLOWED_HOSTS` | no | Comma-separated hostnames, e.g. `.onrender.com` |
+| `CORS_ALLOWED_ORIGINS` | no | Only needed when the Vite dev server calls the API directly |
+| `OSRM_URLS` | yes | Comma-separated OSRM servers, tried in order with hedging |
+| `OPEN_METEO_URL` | yes | Forecast endpoint |
+| `OPEN_METEO_API_KEY` | no | Lifts free-tier rate limits |
+| `PHOTON_URL` | yes | Geocoding server |
+| `BASEMAP_URL` / `BASEMAP_LABELS_URL` | yes / no | Map tile templates, sent to the browser via `/api/meta/` |
+| `HTTP_USER_AGENT` | yes | Identifies the app to the public APIs |
+| `TRUCK_MAX_SPEED_MPH` | no (`65`) | Speed cap applied to ETAs |
+
+| Frontend variable | Purpose |
+|---|---|
+| `VITE_DEV_API_PROXY` | Dev server only: where `/api` is forwarded |
+| `VITE_API_BASE` | API base URL; empty when Django serves the frontend (production) |
 
 ---
 

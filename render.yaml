@@ -1,4 +1,6 @@
 # Render Blueprint: https://render.com/docs/blueprint-spec
+# Values marked `sync: false` are entered in the Render dashboard when the
+# Blueprint is created (copy them from backend/.env.example).
 services:
   - type: web
     name: stormpath
@@ -11,4 +13,18 @@ services:
       - key: DJANGO_DEBUG
         value: "false"
       - key: DJANGO_ALLOWED_HOSTS
-        value: ".onrender.com,localhost"
+        sync: false
+      - key: OSRM_URLS
+        sync: false
+      - key: OPEN_METEO_URL
+        sync: false
+      - key: OPEN_METEO_API_KEY
+        sync: false
+      - key: PHOTON_URL
+        sync: false
+      - key: BASEMAP_URL
+        sync: false
+      - key: BASEMAP_LABELS_URL
+        sync: false
+      - key: HTTP_USER_AGENT
+        sync: false

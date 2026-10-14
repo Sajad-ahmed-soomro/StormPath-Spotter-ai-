@@ -11,7 +11,7 @@ import {
   useMap,
   useMapEvents,
 } from "react-leaflet";
-import type { Checkpoint, HeatLayerKey, PlanResponse, RouteOption } from "../api";
+import type { Checkpoint, HeatLayerKey, MetaResponse, PlanResponse, RouteOption } from "../api";
 import { fmtDayTime, fmtMiles } from "../lib/format";
 import { LEVELS, levelColor } from "../lib/risk";
 import { truckPosition } from "../lib/route";
@@ -21,6 +21,8 @@ import type { HeatField, HeatSample } from "./heatField";
 export const ROUTE_COLORS: Record<string, string> = { A: "#0ea5e9", B: "#8b5cf6", C: "#db2777" };
 
 interface Props {
+  /** Tile URLs come from the backend's environment via /api/meta/. */
+  basemap: MetaResponse["basemap"] | null;
   plan: PlanResponse | null;
   selectedId: string | null;
   onSelect: (id: string) => void;
@@ -46,12 +48,14 @@ export function MapView(props: Props) {
       className="map"
       worldCopyJump
     >
-      <TileLayer
-        url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"
+      {props.basemap && (
+        <TileLayer
+          url={props.basemap.url}
         attribution='Basemap &copy; <a href="https://www.esri.com">Esri</a>, HERE, Garmin, &copy; OpenStreetMap contributors · Weather: <a href="https://open-meteo.com">Open-Meteo</a> · Routing: <a href="https://project-osrm.org">OSRM</a>'
-        maxZoom={16}
-      />
-      <LabelsLayer />
+          maxZoom={16}
+        />
+      )}
+      {props.basemap?.labels_url && <LabelsLayer url={props.basemap.labels_url} />}
       <ZoomControl />
       {field && heatLayer && <HeatmapLayer field={field} layer={heatLayer} hour={hour} />}
       {plan && (
@@ -70,7 +74,7 @@ export function MapView(props: Props) {
 }
 
 /** Place labels drawn above the heatmap so towns stay readable under heavy weather. */
-function LabelsLayer() {
+function LabelsLayer({ url }: { url: string }) {
   const map = useMap();
   useEffect(() => {
     if (!map.getPane("labels")) {
@@ -78,14 +82,11 @@ function LabelsLayer() {
       pane.style.zIndex = "360";
       pane.style.pointerEvents = "none";
     }
-    const layer = L.tileLayer(
-      "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}",
-      { pane: "labels", maxZoom: 16 },
-    ).addTo(map);
+    const layer = L.tileLayer(url, { pane: "labels", maxZoom: 16 }).addTo(map);
     return () => {
       layer.remove();
     };
-  }, [map]);
+  }, [map, url]);
   return null;
 }
 

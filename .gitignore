@@ -4,5 +4,9 @@ dist/
 __pycache__/
 *.pyc
 staticfiles/
-.env
 .DS_Store
+
+# Environment files hold secrets; only the examples are committed.
+.env
+.env.*
+!.env.example

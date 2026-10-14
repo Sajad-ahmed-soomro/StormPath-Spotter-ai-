@@ -7,6 +7,23 @@ settings work locally, in Docker and on a PaaS.
 import os
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+# Local development reads backend/.env (see .env.example). In production the
+# host's environment variables take precedence over the file.
+load_dotenv(BASE_DIR / ".env", override=False)
+
+
+def env_required(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise ImproperlyConfigured(
+            f"Missing environment variable {name}. Copy backend/.env.example to backend/.env."
+        )
+    return value
+
 
 def env_bool(name: str, default: bool = False) -> bool:
     return os.environ.get(name, str(default)).lower() in {"1", "true", "yes", "on"}
@@ -16,14 +33,13 @@ def env_list(name: str, default: str = "") -> list[str]:
     return [item.strip() for item in os.environ.get(name, default).split(",") if item.strip()]
 
 
-BASE_DIR = Path(__file__).resolve().parent.parent
 REPO_DIR = BASE_DIR.parent
 # Built React app (``npm run build``). Served by WhiteNoise in production.
 FRONTEND_DIST = Path(os.environ.get("FRONTEND_DIST", REPO_DIR / "frontend" / "dist"))
 
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-insecure-key-change-me")
-DEBUG = env_bool("DJANGO_DEBUG", True)
-ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,0.0.0.0,.onrender.com")
+SECRET_KEY = env_required("DJANGO_SECRET_KEY")
+DEBUG = env_bool("DJANGO_DEBUG", False)
+ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1")
 CSRF_TRUSTED_ORIGINS = env_list("DJANGO_CSRF_TRUSTED_ORIGINS")
 
 INSTALLED_APPS = [
@@ -69,7 +85,7 @@ REST_FRAMEWORK = {
     "UNAUTHENTICATED_USER": None,
 }
 
-CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
+CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS")
 
 USE_TZ = True
 TIME_ZONE = "UTC"
@@ -86,17 +102,16 @@ LOGGING = {
 }
 
 # --- Third-party services -------------------------------------------------
-# All defaults are free, key-less public endpoints.
-OSRM_URLS = env_list(
-    "OSRM_URLS",
-    "https://router.project-osrm.org,https://routing.openstreetmap.de/routed-car",
-)
-OPEN_METEO_URL = os.environ.get("OPEN_METEO_URL", "https://api.open-meteo.com/v1/forecast")
+# Endpoints and keys come from the environment only (see .env.example).
+OSRM_URLS = env_list("OSRM_URLS")
+if not OSRM_URLS:
+    raise ImproperlyConfigured("Missing environment variable OSRM_URLS.")
+OPEN_METEO_URL = env_required("OPEN_METEO_URL")
 OPEN_METEO_API_KEY = os.environ.get("OPEN_METEO_API_KEY", "")
-PHOTON_URL = os.environ.get("PHOTON_URL", "https://photon.komoot.io")
-HTTP_USER_AGENT = os.environ.get(
-    "HTTP_USER_AGENT", "WeatherAwareTruckRouting/1.0 (assessment project)"
-)
+PHOTON_URL = env_required("PHOTON_URL")
+BASEMAP_URL = env_required("BASEMAP_URL")
+BASEMAP_LABELS_URL = os.environ.get("BASEMAP_LABELS_URL", "")
+HTTP_USER_AGENT = env_required("HTTP_USER_AGENT")
 
 # --- Domain tuning ----------------------------------------------------------
 # OSRM's public server only offers a car profile. Heavy trucks are governed
