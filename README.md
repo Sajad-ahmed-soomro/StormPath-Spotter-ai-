@@ -1,0 +1,180 @@
+# StormPath — Weather-Aware Truck Routing
+
+A React + Django web app that helps a truck driver choose the safest route. It weighs forecast weather at the truck's arrival time at each point along the route, the load weight, and travel time.
+
+Enter an origin, a destination, a departure time and a load weight. The app then:
+
+1. Generates **3 route options** with OSRM.
+2. Places **weather checkpoints every 10, 25 or 50 miles** (your choice) and estimates the truck's **ETA** at each one.
+3. Reads the **hourly forecast at that ETA** from Open-Meteo, and classifies risk with the **rule table and load rules** from the brief.
+4. **Recommends a route**: fewest Severe miles → fewest High miles → lowest average risk → shortest time. It explains which criterion decided against each alternative.
+5. Draws all routes, risk-colored checkpoints, ETAs and route summaries on a map. It also shows a **corridor weather heatmap** with a **0–48 h forecast slider** and playback. Truck markers move along each route in step with the slider.
+
+All third-party services are free and need no API key: [OSRM](https://project-osrm.org) for routing, [Open-Meteo](https://open-meteo.com) for weather, [Photon](https://photon.komoot.io) for geocoding, and Esri Light Gray for the basemap.
+
+---
+
+## Quick start
+
+Requirements: Python 3.11+ and Node 18+.
+
+```bash
+# Backend (http://127.0.0.1:8000)
+cd backend
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python manage.py runserver
+
+# Frontend dev server (http://localhost:5173, proxies /api to :8000)
+cd frontend
+npm install
+npm run dev
+```
+
+Production-style single server (Django serves the built SPA through WhiteNoise):
+
+```bash
+cd frontend && npm run build
+cd ../backend && DJANGO_DEBUG=false gunicorn config.wsgi:application \
+  --workers 1 --worker-class gthread --threads 16 --timeout 180
+```
+
+### Tests
+
+```bash
+cd backend && python manage.py test routing     # 27 tests: rules, load rules, ranking, ETAs, geometry
+cd frontend && npm run typecheck
+```
+
+### Deploy
+
+The repo ships a multi-stage `Dockerfile` (it builds the React app, then runs Django under gunicorn) and a Render blueprint (`render.yaml`). On Render, choose **New → Blueprint** and point it at this repo. Any Docker host works the same way. It listens on `$PORT`.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `DJANGO_SECRET_KEY` | dev key | Set in production |
+| `DJANGO_DEBUG` | `true` | `false` in production |
+| `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1,.onrender.com` | Comma-separated |
+| `OSRM_URLS` | demo server, FOSSGIS mirror | Tried in order, with hedging |
+| `OPEN_METEO_API_KEY` | – | Optional, lifts free-tier limits |
+| `TRUCK_MAX_SPEED_MPH` | `65` | Speed cap applied to ETAs |
+
+---
+
+## How it works
+
+```
+frontend (React + TS + Leaflet)               backend (Django + DRF)
+──────────────────────────────                ─────────────────────────────────────────
+PlanForm ──POST /api/plan/───────────────────► planner.plan_trip
+                                                 ├─ osrm.get_routes      3 distinct routes
+                                                 ├─ truck_timed          per-segment truck ETAs
+                                                 ├─ build_checkpoints    every N mi + destination
+                                                 ├─ weather.get_hourly   one batched fetch, cached
+                                                 ├─ risk.assess          rule table + load rules
+                                                 └─ recommend.rank       lexicographic ranking
+MapView / RouteCards / RouteDetail ◄──────────── routes, checkpoints, segments, recommendation
+
+ForecastControl ──POST /api/heatmap/─────────► heatmap.build_heatmap
+HeatField (canvas renderer) ◄────────────────── corridor grid × 49 hours × {risk, wind, rain, snow}
+```
+
+The core logic is in `backend/routing/services/`. Each module is small and pure where possible:
+
+| Module | Responsibility |
+|---|---|
+| `risk.py` | Rule table and load rules; discrete level plus a continuous 0–4 index |
+| `osrm.py` | Route options; via-point fallback that guarantees a third route; hedged requests |
+| `planner.py` | Truck ETAs, checkpoint sampling, risk miles, map segments |
+| `weather.py` | Batched Open-Meteo client, caching, sampling at an exact ETA |
+| `recommend.py` | Ranking and human-readable reasons |
+| `heatmap.py` | Mercator-uniform corridor grid and hourly risk fields |
+
+### Routes
+
+OSRM's `alternatives` often returns only 1–2 routes for long trips. When it does, the backend generates more by sending the route through **via points offset ±12% / ±25% to either side of the trip midpoint**. It screens those candidates with cheap simplified queries that run *in parallel* with the main query. A candidate is kept only if:
+
+- it shares **< 80%** of its length with any existing route (relaxed to 95% if needed), and
+- it is at most **60% slower** than the fastest route.
+
+Each route is named after the town where it diverges most from the others (for example "Route C via Marshall, KS").
+
+Public OSRM servers vary from under 1 s to over 15 s for the same query. If the first server hasn't answered in 5 s, the same request goes to the mirror and the first answer wins. Routes are cached for 30 minutes, so changing the checkpoint interval re-plans quickly.
+
+### ETAs
+
+OSRM returns a travel time for every road segment (`annotations=duration`). The public server only has a car profile, so each segment is slowed to at most **65 mph** (configurable) to reflect a loaded truck. A checkpoint's ETA is the departure time plus the cumulative truck time to that mile, interpolated along the geometry. Hours-of-service breaks are not modelled.
+
+### Weather at the ETA
+
+- Checkpoints sit at **mile 0, every N miles, and the destination**.
+- Forecasts come from Open-Meteo in the rule units directly (mph, in/hr). Rain is `rain + showers`; snow is `snowfall`.
+- **Wind** is interpolated linearly between the hours on either side of the ETA.
+- **Precipitation** in Open-Meteo is the amount accumulated over the *preceding* hour. For an ETA of 08:30 the app therefore uses the value stamped 09:00 (the 08:00–09:00 accumulation). Unit tests cover this.
+- All checkpoints from all routes are fetched in **one batched, de-duplicated request**. Forecasts are cached per location in 6-hour-aligned windows, which the heatmap and re-plans reuse.
+
+### Risk rules
+
+| Condition | Low | Moderate | High | Severe | No Travel |
+|---|---|---|---|---|---|
+| Wind | <25 mph | 25–34 | 35–44 | 45–54 | ≥55 |
+| Rain | <0.10 in/hr | 0.10–0.25 | 0.25–0.50 | 0.50–1.00 | >1.00 |
+| Snow | <0.5 in/hr | 0.5–1.0 | 1.0–2.0 | 2.0–3.0 | >3.0 |
+
+The load rules apply to wind:
+
+- ≥55 mph → No Travel for any load
+- 45–54 mph with >30,000 lb → No Travel
+- 35–44 mph with >40,000 lb → Severe
+
+A checkpoint's level is the **worst** of wind (after load rules), rain and snow. The table's ranges share their edge values, so I resolved boundaries as follows:
+
+- Each band **includes its lower bound**: 35.0 mph is High, and 0.25 in/hr is High.
+- Wind bands are continuous: 34.6 mph is still Moderate.
+- Rain and snow No Travel is **strictly greater** than the top value (rain 1.00 is Severe), while wind No Travel is inclusive (≥55).
+- The load thresholds are strict: exactly 30,000 lb does not trigger the first rule.
+
+Unit tests cover every edge.
+
+### Risk miles and recommendation
+
+Each checkpoint represents the stretch of road **halfway to its neighbours**, so a route's risk miles add up exactly to its length. The average risk is the distance-weighted mean of the levels (Low 0 … No Travel 4).
+
+Routes are ranked lexicographically by:
+
+0. **fewest No-Travel miles.** The brief doesn't list this, but No Travel is strictly worse than Severe, so a route crossing a closure must never win on a tiebreak.
+1. fewest Severe miles
+2. fewest High miles
+3. lowest average risk
+4. shortest travel time
+
+Miles are compared at 0.1 mi and average risk at 0.01, so float noise never decides a ranking. The UI states the deciding criterion against each alternative, for example "Fewer High-risk miles than Route C (0.0 mi vs 50 mi)". It also warns when even the best route includes Severe or No-Travel miles.
+
+### Heatmap
+
+- **Grid.** The backend lays a grid over a buffer around all routes: 20–75 mi wide, scaled with trip length, with about 200 cells. The grid is **uniform in Web Mercator**, so the browser can stretch one canvas over its bounds with no distortion. Cells near the corridor edge carry a fade weight.
+- **Data.** For each of 49 hours the backend sends the load-adjusted risk index. That index is the same rule code as the checkpoints, made continuous within each band so the colours shade smoothly. Raw wind, rain and snow values are included too.
+- **Rendering (`HeatField`).** The slider's fractional hour is blended between neighbouring frames. The renderer then **bilinearly upsamples value × weight and weight**, which gives soft edges without dark fringes, and colours each pixel through a 256-entry lookup table. Each paint is coalesced into one `requestAnimationFrame`. In Chrome, dragging the slider repaints at display rate (~16.6 ms per frame). Map layers are memoized, so playback never re-renders routes or markers.
+- **Hover readout.** Hovering anywhere in the corridor shows interpolated wind, rain, snow and risk.
+- **Timeline.** The slider is relative to the departure hour. Each route's truck marker shows where that truck will be at the selected time, so you can watch a route drive into, or ahead of, a weather system.
+
+---
+
+## API
+
+| Method | Path | Body / query |
+|---|---|---|
+| `POST` | `/api/plan/` | `{origin, destination, departure, load_weight_lb, interval_mi}`. `origin` and `destination` are `{label, lat?, lon?}`; free text is geocoded. `interval_mi` is 10, 25 or 50. |
+| `POST` | `/api/heatmap/` | `{paths: [[[lat, lon], …], …], departure, load_weight_lb}` |
+| `GET` | `/api/geocode/?q=` | Place autocomplete |
+| `GET` | `/api/meta/` | Rule thresholds (single source for UI legends) |
+| `GET` | `/api/health/` | Liveness |
+
+Validation errors return `400 {"error": "..."}`. Upstream failures return `502` with a readable message.
+
+## Known limitations
+
+- **No truck-specific routing.** The public OSRM server has no HGV profile (bridge heights, truck restrictions). The speed cap approximates truck travel times only.
+- **Open-Meteo free-tier quotas.** The free tier counts each location as one call, with limits of about 600 per minute and 10,000 per day. A long trip at a 10-mile interval plus its heatmap uses roughly 300–500 calls. Caching and de-duplication reduce repeat usage. Set `OPEN_METEO_API_KEY` for heavy use.
+- **Departure window.** Departures are limited to the next 7 days, which keeps every ETA and the 48 h heatmap inside the 16-day forecast range.
+- **Forecasts are model output.** Convective spikes in individual model hours, such as an isolated 3 in/hr cell, appear exactly as forecast.
