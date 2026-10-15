@@ -1,28 +1,26 @@
-"""Hourly forecasts from Open-Meteo, batched by location and cached.
+"""Hourly forecasts from Open-Meteo: request specs and validated parsing.
 
-Units requested from the API match the risk rules directly: wind in mph,
-rain and snowfall in inches. Open-Meteo reports precipitation as the amount
-accumulated over the *preceding* hour, so the value stamped HH:00 is the rate
-for (HH-1:00, HH:00]. Instantaneous fields (wind, temperature) are linearly
-interpolated to the exact ETA.
+The visitor's browser downloads the forecasts. Open-Meteo's free tier is
+rate-limited per IP address, and hosting platforms share outbound IPs between
+many customers, so server-side fetching exhausts a quota we don't control. The
+backend still decides *what* to fetch (locations, window, variables, units)
+through a request spec, and it validates and interprets what comes back.
+
+Units requested match the risk rules directly: wind in mph, rain and snowfall
+in inches. Open-Meteo reports precipitation as the amount accumulated over the
+*preceding* hour, so the value stamped HH:00 is the rate for (HH-1:00, HH:00].
+Instantaneous fields (wind, temperature) are linearly interpolated to the
+exact ETA.
 """
 
 from __future__ import annotations
 
-import logging
 import math
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
-import requests
 from django.conf import settings
-from django.core.cache import cache
-
-from .http import ExternalServiceError, session
-
-log = logging.getLogger(__name__)
 
 HOURLY_VARS = (
     "wind_speed_10m",
@@ -33,9 +31,12 @@ HOURLY_VARS = (
     "temperature_2m",
     "weather_code",
 )
-BATCH_SIZE = 100  # locations per request; keeps URLs well under limits
+BATCH_SIZE = 100  # locations per browser request; keeps URLs well under limits
 COORD_DECIMALS = 2  # ~1 km; lets overlapping routes share forecasts
-MIN_WINDOW_HOURS = 72
+
+
+class InvalidWeatherData(ValueError):
+    """Forecast data sent by the client doesn't match the request spec."""
 
 
 @dataclass
@@ -90,109 +91,88 @@ def floor_hour(when: datetime) -> datetime:
     return when.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
 
-def _round(point: tuple[float, float]) -> tuple[float, float]:
-    return round(point[0], COORD_DECIMALS), round(point[1], COORD_DECIMALS)
+@dataclass
+class WeatherRequest:
+    """What to download: unique locations over an hourly window."""
+
+    start: datetime
+    hours: int
+    locations: list[tuple[float, float]]
+    point_index: list[int]  # for each requested point, its index in ``locations``
+
+    def spec(self) -> dict:
+        """Everything the browser needs to fetch exactly this data."""
+        return {
+            "url": settings.OPEN_METEO_URL,
+            "batch_size": BATCH_SIZE,
+            "locations": [list(p) for p in self.locations],
+            "params": {
+                "hourly": ",".join(HOURLY_VARS),
+                "wind_speed_unit": "mph",
+                "precipitation_unit": "inch",
+                "temperature_unit": "fahrenheit",
+                "timezone": "GMT",
+                "start_hour": self.start.strftime("%Y-%m-%dT%H:%M"),
+                "end_hour": (self.start + timedelta(hours=self.hours - 1)).strftime("%Y-%m-%dT%H:%M"),
+            },
+        }
 
 
-def _cache_key(point: tuple[float, float], start: datetime, hours: int) -> str:
-    return f"wx:{point[0]:.2f},{point[1]:.2f}:{start:%Y%m%d%H}:{hours}"
+def build_request(points: list[tuple[float, float]], start: datetime, hours: int) -> WeatherRequest:
+    """Round and de-duplicate points so shared stretches of road are fetched once."""
+    start = floor_hour(start)
+    rounded = [(round(lat, COORD_DECIMALS), round(lon, COORD_DECIMALS)) for lat, lon in points]
+    unique = list(dict.fromkeys(rounded))
+    position = {p: i for i, p in enumerate(unique)}
+    return WeatherRequest(
+        start=start,
+        hours=max(int(hours), 2),
+        locations=unique,
+        point_index=[position[p] for p in rounded],
+    )
 
 
-def _clean(values) -> np.ndarray:
-    # Open-Meteo uses null for missing hours (e.g. beyond a model's horizon).
-    return np.nan_to_num(np.array(values, dtype=float), nan=0.0)
-
-
-def _fetch_batch(points: list[tuple[float, float]], start: datetime, hours: int) -> list[HourlySeries]:
-    end = start + timedelta(hours=hours - 1)
-    params = {
-        "latitude": ",".join(f"{lat:.2f}" for lat, _ in points),
-        "longitude": ",".join(f"{lon:.2f}" for _, lon in points),
-        "hourly": ",".join(HOURLY_VARS),
-        "wind_speed_unit": "mph",
-        "precipitation_unit": "inch",
-        "temperature_unit": "fahrenheit",
-        "timezone": "GMT",
-        "start_hour": start.strftime("%Y-%m-%dT%H:%M"),
-        "end_hour": end.strftime("%Y-%m-%dT%H:%M"),
-    }
-    if settings.OPEN_METEO_API_KEY:
-        params["apikey"] = settings.OPEN_METEO_API_KEY
+def _array(hourly: dict, name: str, hours: int) -> np.ndarray:
+    values = hourly.get(name)
+    if not isinstance(values, list) or len(values) != hours:
+        raise InvalidWeatherData(f"'{name}' must be a list of {hours} hourly values.")
     try:
-        resp = session().get(settings.OPEN_METEO_URL, params=params, timeout=45)
-        data = resp.json()
-    except requests.exceptions.RetryError as exc:
-        raise ExternalServiceError(
-            "Weather service rate limit reached (free Open-Meteo tier). Please retry in a minute."
-        ) from exc
-    except Exception as exc:
-        raise ExternalServiceError(f"Weather service unavailable ({exc}).") from exc
-    if isinstance(data, dict) and data.get("error"):
-        raise ExternalServiceError(f"Weather service error: {data.get('reason')}")
-    results = data if isinstance(data, list) else [data]
+        # Open-Meteo uses null for hours beyond a model's horizon.
+        arr = np.array([0.0 if v is None else float(v) for v in values])
+    except (TypeError, ValueError):
+        raise InvalidWeatherData(f"'{name}' contains non-numeric values.") from None
+    if not np.all(np.isfinite(arr)):
+        raise InvalidWeatherData(f"'{name}' contains non-finite values.")
+    return arr
 
+
+def parse(request: WeatherRequest, hourly_by_location: list) -> list[HourlySeries]:
+    """Validate the client's forecasts and return one series per requested point.
+
+    ``hourly_by_location`` holds the ``hourly`` object Open-Meteo returned for
+    each location in the spec, in the same order.
+    """
+    if not isinstance(hourly_by_location, list) or len(hourly_by_location) != len(request.locations):
+        raise InvalidWeatherData(
+            f"Expected forecasts for {len(request.locations)} locations."
+        )
     series = []
-    for item in results:
-        h = item["hourly"]
+    for hourly in hourly_by_location:
+        if not isinstance(hourly, dict):
+            raise InvalidWeatherData("Each forecast must be an object of hourly arrays.")
+        arrays = {name: _array(hourly, name, request.hours) for name in HOURLY_VARS}
         series.append(
             HourlySeries(
-                start=start,
-                wind=_clean(h["wind_speed_10m"]),
-                gust=_clean(h["wind_gusts_10m"]),
-                rain=_clean(h["rain"]) + _clean(h["showers"]),
-                snow=_clean(h["snowfall"]),
-                temp=_clean(h["temperature_2m"]),
-                code=_clean(h["weather_code"]),
+                start=request.start,
+                wind=arrays["wind_speed_10m"],
+                gust=arrays["wind_gusts_10m"],
+                rain=arrays["rain"] + arrays["showers"],
+                snow=arrays["snowfall"],
+                temp=arrays["temperature_2m"],
+                code=arrays["weather_code"],
             )
         )
-    return series
-
-
-def fetch_window(start: datetime, hours: int) -> tuple[datetime, int]:
-    """Widen a request to a cache-friendly window.
-
-    Windows start on a 6-hour boundary and span whole days (at least three),
-    so checkpoints, the heatmap and re-plans with a different interval, load
-    or nearby departure time all share cached forecasts. This matters because
-    the free Open-Meteo tier counts every location as one API call.
-    """
-    start = floor_hour(start)
-    aligned = start.replace(hour=start.hour - start.hour % 6)
-    needed = (start - aligned).total_seconds() / 3600 + hours
-    return aligned, max(MIN_WINDOW_HOURS, int(math.ceil(needed / 24)) * 24)
-
-
-def get_hourly(points: list[tuple[float, float]], start: datetime, hours: int) -> list[HourlySeries]:
-    """Hourly series for each point covering at least ``[start, start + hours)``.
-
-    Points are rounded and de-duplicated before fetching, and results are
-    cached per (location, window), so overlapping routes and repeated
-    requests only hit the API once.
-    """
-    start, hours = fetch_window(start, hours)
-    rounded = [_round(p) for p in points]
-    unique = list(dict.fromkeys(rounded))
-
-    found: dict[tuple[float, float], HourlySeries] = {}
-    keys = {p: _cache_key(p, start, hours) for p in unique}
-    cached = cache.get_many(list(keys.values()))
-    for p, key in keys.items():
-        if key in cached:
-            found[p] = cached[key]
-
-    missing = [p for p in unique if p not in found]
-    batches = [missing[i : i + BATCH_SIZE] for i in range(0, len(missing), BATCH_SIZE)]
-    if batches:
-        log.info("Fetching weather for %d locations in %d batches", len(missing), len(batches))
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            for batch, result in zip(batches, pool.map(lambda b: _fetch_batch(b, start, hours), batches)):
-                for p, series in zip(batch, result):
-                    found[p] = series
-                cache.set_many(
-                    {keys[p]: s for p, s in zip(batch, result)}, settings.WEATHER_CACHE_SECONDS
-                )
-
-    return [found[p] for p in rounded]
+    return [series[i] for i in request.point_index]
 
 
 WMO_DESCRIPTIONS = {

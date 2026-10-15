@@ -120,8 +120,8 @@ LOGGING = {
 OSRM_URLS = env_list("OSRM_URLS")
 if not OSRM_URLS:
     raise ImproperlyConfigured("Missing environment variable OSRM_URLS.")
+# Sent to the browser, which downloads the forecasts (see services/weather.py).
 OPEN_METEO_URL = env_required("OPEN_METEO_URL")
-OPEN_METEO_API_KEY = os.environ.get("OPEN_METEO_API_KEY", "")
 PHOTON_URL = env_required("PHOTON_URL")
 BASEMAP_URL = env_required("BASEMAP_URL")
 BASEMAP_LABELS_URL = os.environ.get("BASEMAP_LABELS_URL", "")
@@ -133,4 +133,6 @@ HTTP_USER_AGENT = env_required("HTTP_USER_AGENT")
 # most this speed when computing ETAs.
 TRUCK_MAX_SPEED_MPH = float(os.environ.get("TRUCK_MAX_SPEED_MPH", "65"))
 ROUTE_CACHE_SECONDS = 30 * 60
-WEATHER_CACHE_SECONDS = 20 * 60
+
+# Browsers upload forecasts for every checkpoint (up to a few MB on long trips).
+DATA_UPLOAD_MAX_MEMORY_SIZE = 12 * 1024 * 1024

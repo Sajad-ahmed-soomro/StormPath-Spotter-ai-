@@ -41,14 +41,13 @@ class PlanRequestSerializer(serializers.Serializer):
 
 
 class HeatmapRequestSerializer(serializers.Serializer):
-    paths = serializers.ListField(
-        child=serializers.ListField(
-            child=serializers.ListField(child=serializers.FloatField(), min_length=2, max_length=2),
-            min_length=2,
-            max_length=20_000,
-        ),
-        min_length=1,
-        max_length=3,
-    )
-    departure = serializers.DateTimeField(validators=[validate_departure])
-    load_weight_lb = serializers.FloatField(min_value=0, max_value=MAX_LOAD_LB)
+    plan_id = serializers.CharField(max_length=64)
+
+
+class ForecastSerializer(serializers.Serializer):
+    """Open-Meteo ``hourly`` objects in the order of the spec's locations.
+
+    Their contents are validated by ``weather.parse`` against the spec.
+    """
+
+    hourly = serializers.ListField(child=serializers.DictField(), min_length=1, max_length=5000)

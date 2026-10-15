@@ -156,30 +156,67 @@ def _serialize_checkpoint(i: int, cp: Checkpoint) -> dict:
     }
 
 
-def plan_trip(
+@dataclass
+class PreparedPlan:
+    """Routing stage of a plan, kept server-side while the browser fetches weather."""
+
+    origin: dict
+    destination: dict
+    departure: datetime
+    load_lb: float
+    interval_mi: int
+    routes: list[TimedRoute]
+    checkpoints: list[list[Checkpoint]]
+    names: list[str | None]
+    weather: weather.WeatherRequest
+
+
+def prepare_plan(
     origin: dict,
     destination: dict,
     departure: datetime,
     load_lb: float,
     interval_mi: int,
-) -> dict:
+) -> PreparedPlan:
+    """Routes, truck ETAs and checkpoints, plus the forecasts needed to score them."""
     raw_routes = osrm.get_routes((origin["lat"], origin["lon"]), (destination["lat"], destination["lon"]))
     routes = [truck_timed(r, settings.TRUCK_MAX_SPEED_MPH) for r in raw_routes]
     all_checkpoints = [build_checkpoints(r, interval_mi, departure) for r in routes]
 
-    # One weather fetch for every checkpoint of every route.
+    # One forecast window covering every checkpoint of every route.
     latest_eta = max(cps[-1].eta for cps in all_checkpoints)
     start = weather.floor_hour(departure)
     hours = math.ceil((latest_eta - start).total_seconds() / 3600) + 2
+    points = [(cp.lat, cp.lon) for cps in all_checkpoints for cp in cps]
+    return PreparedPlan(
+        origin=origin,
+        destination=destination,
+        departure=departure,
+        load_lb=load_lb,
+        interval_mi=interval_mi,
+        routes=routes,
+        checkpoints=all_checkpoints,
+        names=_route_names(routes),
+        weather=weather.build_request(points, start, hours),
+    )
+
+
+def score_plan(plan: PreparedPlan, hourly_by_location: list) -> dict:
+    """Weather at each checkpoint's ETA → risk → recommendation (full API payload).
+
+    Raises ``weather.InvalidWeatherData`` if the forecasts don't match the spec.
+    """
+    series = weather.parse(plan.weather, hourly_by_location)
+    routes, all_checkpoints = plan.routes, plan.checkpoints
+    departure, load_lb = plan.departure, plan.load_lb
     flat = [cp for cps in all_checkpoints for cp in cps]
-    series = weather.get_hourly([(cp.lat, cp.lon) for cp in flat], start, hours)
     for cp, s in zip(flat, series):
         wx = s.at(cp.eta)
         wx["description"] = weather.describe(wx["weather_code"])
         result = assess(Conditions(wx["wind_mph"], wx["rain_in_hr"], wx["snow_in_hr"]), load_lb)
         cp.weather, cp.level, cp.index, cp.factors = wx, result.level, result.index, result.factors
 
-    names = _route_names(routes)
+    names = plan.names
     fastest = min(r.duration_s for r in routes)
     summaries, payload = [], []
     for route_id, route, checkpoints, name in zip(ROUTE_IDS, routes, all_checkpoints, names):
@@ -229,11 +266,11 @@ def plan_trip(
         route["recommended"] = route["rank"] == 1
 
     return {
-        "origin": origin,
-        "destination": destination,
+        "origin": plan.origin,
+        "destination": plan.destination,
         "departure": departure.isoformat(),
         "load_weight_lb": load_lb,
-        "interval_mi": interval_mi,
+        "interval_mi": plan.interval_mi,
         "truck_max_speed_mph": settings.TRUCK_MAX_SPEED_MPH,
         "routes": payload,
         "recommendation": recommend.explain(ranked),

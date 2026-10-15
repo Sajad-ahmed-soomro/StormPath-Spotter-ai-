@@ -13,6 +13,7 @@ Per hour and cell the payload carries the load-adjusted continuous risk index
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -85,11 +86,30 @@ def corridor_grid(paths: list[np.ndarray]) -> dict:
     }
 
 
-def build_heatmap(paths: list[np.ndarray], departure: datetime, load_lb: float) -> dict:
+@dataclass
+class PreparedHeatmap:
+    """Corridor grid kept server-side while the browser fetches its forecasts."""
+
+    grid: dict
+    load_lb: float
+    weather: weather.WeatherRequest
+
+
+def prepare_heatmap(paths: list[np.ndarray], departure: datetime, load_lb: float) -> PreparedHeatmap:
     grid = corridor_grid(paths)
-    start = weather.floor_hour(departure)
     # One extra hour: precipitation for hour h is stamped at h+1.
-    series = weather.get_hourly([tuple(p) for p in grid["points"]], start, HOURS + 2)
+    request = weather.build_request([tuple(p) for p in grid["points"]], departure, HOURS + 2)
+    return PreparedHeatmap(grid=grid, load_lb=load_lb, weather=request)
+
+
+def score_heatmap(prepared: PreparedHeatmap, hourly_by_location: list) -> dict:
+    """Hourly risk/wind/rain/snow per corridor cell for hours 0–48.
+
+    Raises ``weather.InvalidWeatherData`` if the forecasts don't match the spec.
+    """
+    grid, load_lb = prepared.grid, prepared.load_lb
+    start = prepared.weather.start
+    series = weather.parse(prepared.weather, hourly_by_location)
 
     risk, wind, rain, snow = [], [], [], []
     for h in range(HOURS + 1):

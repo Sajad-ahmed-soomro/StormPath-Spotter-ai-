@@ -77,6 +77,7 @@ export interface RouteOption {
 }
 
 export interface PlanResponse {
+  plan_id: string;
   origin: ResolvedPlace;
   destination: ResolvedPlace;
   departure: string;
@@ -104,6 +105,26 @@ export interface HeatmapResponse {
   };
   layers: Record<HeatLayerKey, number[][]>;
 }
+
+/** What the browser must download from Open-Meteo for a stage (decided by the backend). */
+export interface WeatherSpec {
+  url: string;
+  batch_size: number;
+  locations: [number, number][];
+  params: Record<string, string>;
+}
+
+export interface PlanStage {
+  plan_id: string;
+  weather: WeatherSpec;
+}
+
+export interface HeatmapStage {
+  heatmap_id: string;
+  weather: WeatherSpec;
+}
+
+type Forecasts = { hourly: Record<string, unknown>[] };
 
 export interface MetaResponse {
   rules: Rules;
@@ -146,10 +167,18 @@ export const api = {
       `/api/geocode/?q=${encodeURIComponent(q)}`,
       { signal },
     ),
+  /** Stage 1: routes, ETAs, checkpoints → which forecasts to fetch. */
   plan: (body: PlanRequest, signal?: AbortSignal) =>
-    request<PlanResponse>("/api/plan/", { method: "POST", body: JSON.stringify(body), signal }),
-  heatmap: (
-    body: { paths: [number, number][][]; departure: string; load_weight_lb: number },
-    signal?: AbortSignal,
-  ) => request<HeatmapResponse>("/api/heatmap/", { method: "POST", body: JSON.stringify(body), signal }),
+    request<PlanStage>("/api/plan/", { method: "POST", body: JSON.stringify(body), signal }),
+  /** Stage 2: forecasts → risk, recommendation, full plan. */
+  scorePlan: (planId: string, body: Forecasts, signal?: AbortSignal) =>
+    request<PlanResponse>(`/api/plan/${planId}/score/`, { method: "POST", body: JSON.stringify(body), signal }),
+  heatmap: (planId: string, signal?: AbortSignal) =>
+    request<HeatmapStage>("/api/heatmap/", { method: "POST", body: JSON.stringify({ plan_id: planId }), signal }),
+  scoreHeatmap: (heatmapId: string, body: Forecasts, signal?: AbortSignal) =>
+    request<HeatmapResponse>(`/api/heatmap/${heatmapId}/score/`, {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal,
+    }),
 };

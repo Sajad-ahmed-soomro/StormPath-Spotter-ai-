@@ -1,18 +1,24 @@
 import logging
+import uuid
 
-import numpy as np
 from django.conf import settings
+from django.core.cache import cache
 from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from .serializers import HeatmapRequestSerializer, PlanRequestSerializer
+from .serializers import ForecastSerializer, HeatmapRequestSerializer, PlanRequestSerializer
 from .services import geo, geocoding
-from .services.heatmap import build_heatmap
+from .services.heatmap import prepare_heatmap, score_heatmap
 from .services.http import ExternalServiceError
-from .services.planner import plan_trip
+from .services.planner import prepare_plan, score_plan
 from .services.risk import rules_payload
+from .services.weather import InvalidWeatherData
+
+# Prepared plans/heatmaps wait in the cache while the browser fetches weather.
+STAGE_TTL_SECONDS = 60 * 60
+EXPIRED = "This plan has expired. Please plan the trip again."
 
 log = logging.getLogger(__name__)
 
@@ -56,8 +62,15 @@ def geocode(request):
         return _error(str(exc), status.HTTP_502_BAD_GATEWAY)
 
 
+def _stash(kind: str, value) -> str:
+    key = uuid.uuid4().hex
+    cache.set(f"{kind}:{key}", value, STAGE_TTL_SECONDS)
+    return key
+
+
 @api_view(["POST"])
 def plan(request):
+    """Stage 1: routes, ETAs and checkpoints, plus the forecasts to fetch."""
     serializer = PlanRequestSerializer(data=request.data)
     if not serializer.is_valid():
         return _error(_first_error(serializer.errors))
@@ -67,7 +80,7 @@ def plan(request):
         destination = _resolve(data["destination"])
         if geo.haversine_mi(origin["lat"], origin["lon"], destination["lat"], destination["lon"]) < 1:
             return _error("Origin and destination must be at least a mile apart.")
-        result = plan_trip(
+        prepared = prepare_plan(
             origin=origin,
             destination=destination,
             departure=data["departure"],
@@ -76,23 +89,53 @@ def plan(request):
         )
     except ExternalServiceError as exc:
         return _error(str(exc), status.HTTP_502_BAD_GATEWAY)
-    return Response(result)
+    return Response({"plan_id": _stash("plan", prepared), "weather": prepared.weather.spec()})
+
+
+@api_view(["POST"])
+def plan_score(request, plan_id: str):
+    """Stage 2: forecasts from the browser → risk, recommendation, full plan."""
+    prepared = cache.get(f"plan:{plan_id}")
+    if prepared is None:
+        return _error(EXPIRED, status.HTTP_404_NOT_FOUND)
+    serializer = ForecastSerializer(data=request.data)
+    if not serializer.is_valid():
+        return _error(_first_error(serializer.errors))
+    try:
+        result = score_plan(prepared, serializer.validated_data["hourly"])
+    except InvalidWeatherData as exc:
+        return _error(f"Invalid forecast data: {exc}")
+    return Response({"plan_id": plan_id, **result})
 
 
 @api_view(["POST"])
 def heatmap(request):
+    """Stage 1: corridor grid around a prepared plan's routes, plus forecasts to fetch."""
     serializer = HeatmapRequestSerializer(data=request.data)
     if not serializer.is_valid():
         return _error(_first_error(serializer.errors))
-    data = serializer.validated_data
+    prepared_plan = cache.get(f"plan:{serializer.validated_data['plan_id']}")
+    if prepared_plan is None:
+        return _error(EXPIRED, status.HTTP_404_NOT_FOUND)
+    prepared = prepare_heatmap(
+        [r.coords for r in prepared_plan.routes], prepared_plan.departure, prepared_plan.load_lb
+    )
+    return Response({"heatmap_id": _stash("heatmap", prepared), "weather": prepared.weather.spec()})
+
+
+@api_view(["POST"])
+def heatmap_score(request, heatmap_id: str):
+    """Stage 2: forecasts from the browser → hourly corridor risk layers."""
+    prepared = cache.get(f"heatmap:{heatmap_id}")
+    if prepared is None:
+        return _error(EXPIRED, status.HTTP_404_NOT_FOUND)
+    serializer = ForecastSerializer(data=request.data)
+    if not serializer.is_valid():
+        return _error(_first_error(serializer.errors))
     try:
-        result = build_heatmap(
-            [np.asarray(p, dtype=float) for p in data["paths"]],
-            data["departure"],
-            data["load_weight_lb"],
-        )
-    except ExternalServiceError as exc:
-        return _error(str(exc), status.HTTP_502_BAD_GATEWAY)
+        result = score_heatmap(prepared, serializer.validated_data["hourly"])
+    except InvalidWeatherData as exc:
+        return _error(f"Invalid forecast data: {exc}")
     return Response(result)
 
 

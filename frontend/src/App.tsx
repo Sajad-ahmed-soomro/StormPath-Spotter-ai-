@@ -14,6 +14,7 @@ import { PlanForm } from "./components/PlanForm";
 import { Recommendation, RouteCards } from "./components/RouteCards";
 import { RouteDetail } from "./components/RouteDetail";
 import { fmtDayTime, fmtLb } from "./lib/format";
+import { fetchForecasts } from "./lib/openMeteo";
 import { LEVELS } from "./lib/risk";
 import { checkpointAtMile, truckPosition } from "./lib/route";
 import { HeatField, type HeatSample } from "./map/heatField";
@@ -21,19 +22,13 @@ import { MapView } from "./map/MapView";
 
 type Status = "idle" | "loading" | "ready" | "error";
 const PLAYBACK_HOURS_PER_SECOND = 3;
-const PLAN_STAGES = [
-  "Finding route options…",
-  "Timing checkpoints along each route…",
-  "Fetching forecasts at each ETA…",
-  "Scoring weather risk…",
-];
 
 export default function App() {
   const [meta, setMeta] = useState<MetaResponse | null>(null);
   const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [planStatus, setPlanStatus] = useState<Status>("idle");
   const [planError, setPlanError] = useState<string | null>(null);
-  const [stage, setStage] = useState(0);
+  const [progress, setProgress] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [highlight, setHighlight] = useState<Checkpoint | null>(null);
 
@@ -55,11 +50,11 @@ export default function App() {
     setHeatStatus("loading");
     setHeatError(null);
     try {
-      const result = await api.heatmap(
-        { paths: p.routes.map((r) => r.path), departure: p.departure, load_weight_lb: p.load_weight_lb },
-        controller.signal,
-      );
-      if (controller.signal.aborted) return;
+      const { signal } = controller;
+      const stage = await api.heatmap(p.plan_id, signal);
+      const hourly = await fetchForecasts(stage.weather, signal);
+      const result = await api.scoreHeatmap(stage.heatmap_id, { hourly }, signal);
+      if (signal.aborted) return;
       setHeat(result);
       setHeatStatus("ready");
     } catch (e) {
@@ -77,11 +72,19 @@ export default function App() {
       planAbort.current = controller;
       setPlanStatus("loading");
       setPlanError(null);
-      setStage(0);
+      setProgress("Finding routes and timing checkpoints…");
       setPlaying(false);
       try {
-        const result = await api.plan(req, controller.signal);
-        if (controller.signal.aborted) return;
+        const { signal } = controller;
+        const stage = await api.plan(req, signal);
+        const total = stage.weather.locations.length;
+        setProgress(`Downloading forecasts for ${total} checkpoints…`);
+        const hourly = await fetchForecasts(stage.weather, signal, (done) =>
+          setProgress(`Downloading forecasts at each ETA… ${done}/${total}`),
+        );
+        setProgress("Scoring weather risk…");
+        const result = await api.scorePlan(stage.plan_id, { hourly }, signal);
+        if (signal.aborted) return;
         setPlan(result);
         setSelectedId(result.recommendation.route_id);
         setHighlight(null);
@@ -101,13 +104,6 @@ export default function App() {
   useEffect(() => {
     api.meta().then(setMeta).catch(() => setMeta(null));
   }, []);
-
-  // Progress messages while the (single) plan request runs.
-  useEffect(() => {
-    if (planStatus !== "loading") return;
-    const timer = window.setInterval(() => setStage((s) => Math.min(s + 1, PLAN_STAGES.length - 1)), 3500);
-    return () => window.clearInterval(timer);
-  }, [planStatus]);
 
   // Forecast playback: advance the hour continuously; frames are blended.
   useEffect(() => {
@@ -180,8 +176,8 @@ export default function App() {
           <div className="progress" role="status">
             <span className="spinner" />
             <div>
-              <strong>{PLAN_STAGES[stage]}</strong>
-              <span>Routing and forecasts come from live public APIs; long trips take ~15–30 s.</span>
+              <strong>{progress}</strong>
+              <span>Routing and forecasts come from live public APIs; long trips can take ~15–30 s.</span>
             </div>
           </div>
         )}

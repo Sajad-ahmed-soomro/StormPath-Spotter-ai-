@@ -22,8 +22,6 @@ services:
         sync: false
       - key: OPEN_METEO_URL
         sync: false
-      - key: OPEN_METEO_API_KEY
-        sync: false
       - key: PHOTON_URL
         sync: false
       - key: BASEMAP_URL

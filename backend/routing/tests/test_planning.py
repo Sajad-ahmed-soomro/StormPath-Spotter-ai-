@@ -13,7 +13,7 @@ from routing.services.planner import (
     truck_timed,
 )
 from routing.services.risk import RiskLevel
-from routing.services.weather import HourlySeries, fetch_window
+from routing.services.weather import HourlySeries, InvalidWeatherData, build_request, parse
 
 DEPART = datetime(2026, 1, 5, 8, 30, tzinfo=timezone.utc)
 
@@ -79,11 +79,29 @@ class WeatherSamplingTests(SimpleTestCase):
         # Precip stamped 09:00 is the accumulation for 08:00–09:00.
         self.assertAlmostEqual(wx["rain_in_hr"], 0.3)
 
-    def test_fetch_window_is_aligned_and_covers_request(self):
-        start, hours = fetch_window(DEPART, 30)
-        self.assertEqual(start, datetime(2026, 1, 5, 6, tzinfo=timezone.utc))
-        self.assertGreaterEqual(start + timedelta(hours=hours), DEPART + timedelta(hours=30))
-        self.assertEqual(hours % 24, 0)
+    def test_request_spec_dedupes_points_and_covers_window(self):
+        req = build_request([(40.001, -100.0), (40.0012, -100.0004), (41.0, -101.0)], DEPART, 30)
+        self.assertEqual(req.locations, [(40.0, -100.0), (41.0, -101.0)])
+        self.assertEqual(req.point_index, [0, 0, 1])
+        self.assertEqual(req.start, datetime(2026, 1, 5, 8, tzinfo=timezone.utc))
+        params = req.spec()["params"]
+        self.assertEqual(params["start_hour"], "2026-01-05T08:00")
+        self.assertEqual(params["end_hour"], "2026-01-06T13:00")  # 30 hourly values
+        self.assertEqual(params["wind_speed_unit"], "mph")
+
+    def test_parse_validates_and_maps_back_to_points(self):
+        req = build_request([(40.0, -100.0), (40.0, -100.0)], DEPART, 3)
+        hourly = {name: [1.0, None, 2.0] for name in ("wind_speed_10m", "wind_gusts_10m", "rain",
+                                                     "showers", "snowfall", "temperature_2m", "weather_code")}
+        series = parse(req, [hourly])
+        self.assertEqual(len(series), 2)
+        self.assertEqual(series[0].rain.tolist(), [2.0, 0.0, 4.0])  # rain + showers, null → 0
+        with self.assertRaises(InvalidWeatherData):
+            parse(req, [{**hourly, "rain": [1.0]}])  # wrong length
+        with self.assertRaises(InvalidWeatherData):
+            parse(req, [{**hourly, "snowfall": ["x", 1, 2]}])
+        with self.assertRaises(InvalidWeatherData):
+            parse(req, [hourly, hourly])  # wrong location count
 
 
 class GeometryTests(SimpleTestCase):
