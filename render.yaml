@@ -14,6 +14,10 @@ services:
         value: "false"
       - key: DJANGO_ALLOWED_HOSTS
         sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: CORS_ALLOWED_ORIGIN_REGEXES
+        sync: false
       - key: OSRM_URLS
         sync: false
       - key: OPEN_METEO_URL

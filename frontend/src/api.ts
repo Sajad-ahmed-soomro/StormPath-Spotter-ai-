@@ -119,7 +119,8 @@ export interface PlanRequest {
   interval_mi: number;
 }
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "";
+// Backend origin, set at build time (Vercel env). Empty = same origin.
+const API_BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/+$/, "");
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let resp: Response;

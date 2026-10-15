@@ -59,7 +59,8 @@ All configuration lives in environment variables. Nothing (API endpoints, keys, 
 | `DJANGO_SECRET_KEY` | yes | Django secret |
 | `DJANGO_DEBUG` | no (`false`) | `true` for local development |
 | `DJANGO_ALLOWED_HOSTS` | no | Comma-separated hostnames, e.g. `.onrender.com` |
-| `CORS_ALLOWED_ORIGINS` | no | Only needed when the Vite dev server calls the API directly |
+| `CORS_ALLOWED_ORIGINS` | no | Frontend origins on another host, e.g. the Vercel URL |
+| `CORS_ALLOWED_ORIGIN_REGEXES` | no | Patterns for Vercel preview URLs |
 | `OSRM_URLS` | yes | Comma-separated OSRM servers, tried in order with hedging |
 | `OPEN_METEO_URL` | yes | Forecast endpoint |
 | `OPEN_METEO_API_KEY` | no | Lifts free-tier rate limits |
@@ -71,7 +72,9 @@ All configuration lives in environment variables. Nothing (API endpoints, keys, 
 | Frontend variable | Purpose |
 |---|---|
 | `VITE_DEV_API_PROXY` | Dev server only: where `/api` is forwarded |
-| `VITE_API_BASE` | API base URL; empty when Django serves the frontend (production) |
+| `VITE_API_BASE` | Backend URL when the frontend is hosted separately (e.g. on Vercel); empty when Django serves it |
+
+**Frontend on Vercel, backend on Render:** import the repo in Vercel with **Root Directory `frontend`**. `frontend/vercel.json` sets up the Vite build. Add `VITE_API_BASE=https://<your-service>.onrender.com` in Vercel. On Render, set `CORS_ALLOWED_ORIGINS=https://<your-app>.vercel.app`.
 
 ---
 

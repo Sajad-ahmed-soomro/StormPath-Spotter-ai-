@@ -95,7 +95,11 @@ REST_FRAMEWORK = {
     "UNAUTHENTICATED_USER": None,
 }
 
-CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS")
+# Origins of a separately hosted frontend (e.g. Vercel). Trailing slashes are
+# dropped because an origin is scheme + host only.
+CORS_ALLOWED_ORIGINS = [o.rstrip("/") for o in env_list("CORS_ALLOWED_ORIGINS")]
+# Optional patterns, e.g. ^https://stormpath-.*\.vercel\.app$ for preview deploys.
+CORS_ALLOWED_ORIGIN_REGEXES = env_list("CORS_ALLOWED_ORIGIN_REGEXES")
 
 USE_TZ = True
 TIME_ZONE = "UTC"
