@@ -39,7 +39,17 @@ FRONTEND_DIST = Path(os.environ.get("FRONTEND_DIST", REPO_DIR / "frontend" / "di
 
 SECRET_KEY = env_required("DJANGO_SECRET_KEY")
 DEBUG = env_bool("DJANGO_DEBUG", False)
-ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1")
+def _hostname(value: str) -> str:
+    """Accept pasted URLs too: 'https://app.example.com/' -> 'app.example.com'."""
+    value = value.strip().strip("'\"")
+    value = value.split("://", 1)[-1]
+    return value.split("/", 1)[0]
+
+
+ALLOWED_HOSTS = [_hostname(h) for h in env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1")]
+# Render sets this automatically for every web service.
+if os.environ.get("RENDER_EXTERNAL_HOSTNAME"):
+    ALLOWED_HOSTS.append(os.environ["RENDER_EXTERNAL_HOSTNAME"])
 CSRF_TRUSTED_ORIGINS = env_list("DJANGO_CSRF_TRUSTED_ORIGINS")
 
 INSTALLED_APPS = [
